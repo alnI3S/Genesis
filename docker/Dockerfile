@@ -35,10 +35,11 @@ RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 && \
 # Install Rust for build requirements
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 
-RUN pip install "pybind11[global]"
+
+RUN python3 -m pip install --break-system-packages "pybind11[global]"
 
 # Install CMake
-RUN pip install --no-cache-dir cmake==3.31.6
+RUN python3 -m pip install --break-system-packages --no-cache-dir cmake==3.31.6
 
 # Build LuisaRender
 WORKDIR /workspace
@@ -64,9 +65,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     wget \
+    gosu \
     bash-completion \
     libgl1 \
-    libgl1-mesa-glx \
+    libgl1-mesa-dri \
     libglu1-mesa \
     libegl-dev \
     libegl1 \
@@ -88,11 +90,11 @@ WORKDIR /workspace
 RUN useradd --shell /bin/bash -u 1001 -c "" -m user
 
 # --------------------------- Genesis ----------------------------
-RUN pip install --no-cache-dir open3d
+RUN python3 -m pip install --break-system-packages --no-cache-dir open3d 
 RUN git clone https://github.com/Genesis-Embodied-AI/Genesis.git && \
     cd Genesis && \
-    pip install . && \
-    pip install --no-cache-dir PyOpenGL==3.1.5
+    python3 -m pip install --break-system-packages . && \
+    python3 -m pip install --break-system-packages --no-cache-dir PyOpenGL==3.1.5
 
 # -------------------- Surface Reconstruction --------------------
 # Set the LD_LIBRARY_PATH directly in the environment
@@ -114,13 +116,37 @@ COPY nvidia_icd.json /usr/share/vulkan/icd.d/nvidia_icd.json
 COPY nvidia_layers.json /etc/vulkan/implicit_layer.d/nvidia_layers.json
 
 # ---------------------- Custom Entrypoint -----------------------
-RUN echo '#!/bin/bash\n\
-if [ -n "${LOCAL_USER_ID}" ]; then\n\
-  echo "Starting with UID: $LOCAL_USER_ID"\n\
-  usermod -u $LOCAL_USER_ID user\n\
-  chown -R user:user /opt/conda/lib/python${PYTHON_VERSION}/site-packages/genesis/ext/LuisaRender/\n\
-fi\n\
-exec /bin/bash' > /entrypoint.sh && \
-chmod +x /entrypoint.sh
+RUN cat <<'EOF' > /entrypoint.sh
+#!/bin/bash
+set -e
+
+detectUIDConflict() {
+    USER_NAME=user
+    TARGET_UID=${LOCAL_USER_ID:-1000}
+
+    EXISTING_USER=$(getent passwd "$TARGET_UID" | cut -d: -f1 || true)
+
+    if [ -n "$EXISTING_USER" ] && [ "$EXISTING_USER" != "$USER_NAME" ]; then
+        echo "UID $TARGET_UID already belongs to $EXISTING_USER — removing it"
+        userdel "$EXISTING_USER" || true
+    fi
+}
+
+if [ -n "${LOCAL_USER_ID}" ]; then
+  echo "Starting with UID: $LOCAL_USER_ID"
+
+  detectUIDConflict
+
+  usermod -u "$LOCAL_USER_ID" user
+
+  chown -R user:user /opt/conda/lib/python${PYTHON_VERSION}/site-packages/genesis/ext/LuisaRender/ || true
+  # run as user
+  exec gosu user "$@"
+else
+  exec "$@"
+fi
+EOF
+
+RUN chmod +x /entrypoint.sh
 
 ENTRYPOINT ["/entrypoint.sh"]
